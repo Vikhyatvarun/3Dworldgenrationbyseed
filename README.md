@@ -1,3 +1,3 @@
-Genrate 3D world by useing seed.
+3D world genration by using seed.
 
 https://vikhyatvarun.github.io/3Dworldgenrationbyseed/
