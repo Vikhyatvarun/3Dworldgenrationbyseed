@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural 3D World Gen</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 12px;
+            color: white;
+            pointer-events: auto;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255,255,255,0.1);
+            max-width: 300px;
+            z-index: 5;
+        }
+
+        h1 { margin: 0 0 10px 0; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 2px; }
+        p { font-size: 0.9rem; color: #ccc; margin-bottom: 15px; }
+
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border: none;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.1);
+            color: white;
+            font-family: monospace;
+            box-sizing: border-box; 
+        }
+        input[type="text"]:focus { outline: 2px solid #4CAF50; }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            border: none;
+            border-radius: 4px;
+            background: #4CAF50;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background: #45a049; }
+
+        #instructions {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: white;
+            pointer-events: none;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+            transition: opacity 0.3s;
+            z-index: 5;
+        }
+        .key {
+            display: inline-block;
+            border: 1px solid rgba(255,255,255,0.4);
+            border-radius: 4px;
+            padding: 2px 8px;
+            background: rgba(0,0,0,0.3);
+            margin: 0 2px;
+        }
+        
+        #loading {
+            display: none;
+            text-align: center;
+            margin-top: 10px;
+            color: #4CAF50;
+            font-size: 0.8rem;
+        }
+
+        /* Crosshair Style */
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 8px;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.8);
+            border: 1.5px solid rgba(0, 0, 0, 0.5);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Crosshair Element -->
+    <div id="crosshair"></div>
+
+    <div id="ui-layer">
+        <h1>World Generator</h1>
+        <p>Enter a seed to generate a unique infinite-style terrain.</p>
+        
+        <div class="control-group">
+            <label for="seedInput">World Seed</label>
+            <input type="text" id="seedInput" value="mountains" placeholder="Enter seed...">
+        </div>
+
+        <button id="genBtn">Generate World</button>
+        <div id="loading">Generating Terrain...</div>
+        <br><br>
+        <p style="font-size: 0.8rem; opacity: 0.7;">Press <b>ESC</b> to unlock mouse.</p>
+    </div>
+
+    <div id="instructions">
+        <h1>Click to Explore</h1>
+        <p>Use <span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> to walk</p>
+        <p>Use <span class="key">SPACE</span> to jump</p>
+        <p>Use <span class="key">MOUSE</span> to look</p>
+        <p>Use <span class="key">SHIFT</span> to run</p>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <!-- Import Three.js and Simplex Noise -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+        
+        // --- 1. Utilities (RNG & Noise) ---
+
+        // A simple seedable random number generator (Linear Congruential Generator)
+        class SeededRandom {
+            constructor(seed) {
+                this.seed = this.hashString(seed.toString());
+            }
+
+            // DJB2 Hash function to turn string into integer
+            hashString(str) {
+                let hash = 5381;
+                for (let i = 0; i < str.length; i++) {
+                    hash = ((hash << 5) + hash) + str.charCodeAt(i);
+                }
+                return hash;
+            }
+
+            // Returns a number between 0 and 1
+            next() {
+                this.seed = (this.seed * 9301 + 49297) % 233280;
+                return this.seed / 233280;
+            }
+        }
+
+        // 2D Simplex Noise Implementation (Self-contained to avoid external dep complexity)
+        class SimplexNoise {
+            constructor(randomFunc) {
+                this.p = new Uint8Array(256);
+                this.perm = new Uint8Array(512);
+                this.permMod12 = new Uint8Array(512);
+                for (let i = 0; i < 256; i++) {
+                    this.p[i] = Math.floor(randomFunc() * 256);
+                }
+                for (let i = 0; i < 512; i++) {
+                    this.perm[i] = this.p[i & 255];
+                    this.permMod12[i] = this.perm[i] % 12;
+                }
+                this.grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+            }
+            
+            dot(g, x, y) { return g[0]*x + g[1]*y; }
+
+            noise(xin, yin) {
+                let n0, n1, n2;
+                const F2 = 0.5 * (Math.sqrt(3.0) - 1.0);
+                const s = (xin + yin) * F2;
+                const i = Math.floor(xin + s);
+                const j = Math.floor(yin + s);
+                const G2 = (3.0 - Math.sqrt(3.0)) / 6.0;
+                const t = (i + j) * G2;
+                const X0 = i - t;
+                const Y0 = j - t;
+                const x0 = xin - X0;
+                const y0 = yin - Y0;
+                let i1, j1;
+                if(x0 > y0) { i1 = 1; j1 = 0; } else { i1 = 0; j1 = 1; }
+                const x1 = x0 - i1 + G2;
+                const y1 = y0 - j1 + G2;
+                const x2 = x0 - 1.0 + 2.0 * G2;
+                const y2 = y0 - 1.0 + 2.0 * G2;
+                const ii = i & 255;
+                const jj = j & 255;
+                const gi0 = this.permMod12[ii + this.perm[jj]];
+                const gi1 = this.permMod12[ii + i1 + this.perm[jj + j1]];
+                const gi2 = this.permMod12[ii + 1 + this.perm[jj + 1]];
+                let t0 = 0.5 - x0 * x0 - y0 * y0;
+                if(t0 < 0) n0 = 0.0;
+                else { t0 *= t0; n0 = t0 * t0 * this.dot(this.grad3[gi0], x0, y0); }
+                let t1 = 0.5 - x1 * x1 - y1 * y1;
+                if(t1 < 0) n1 = 0.0;
+                else { t1 *= t1; n1 = t1 * t1 * this.dot(this.grad3[gi1], x1, y1); }
+                let t2 = 0.5 - x2 * x2 - y2 * y2;
+                if(t2 < 0) n2 = 0.0;
+                else { t2 *= t2; n2 = t2 * t2 * this.dot(this.grad3[gi2], x2, y2); }
+                return 70.0 * (n0 + n1 + n2);
+            }
+        }
+
+
+        // --- 2. Configuration ---
+        
+        const WORLD_WIDTH = 1000;
+        const WORLD_DEPTH = 1000;
+        const SEGMENTS = 250; 
+        const MAX_HEIGHT = 120;
+        
+        // Physics Constants
+        const GRAVITY = 300.0; // Gravity strength
+        const JUMP_HEIGHT = 100.0; // Jump force
+        const PLAYER_HEIGHT = 10.0; // Eyes above ground
+
+        let scene, camera, renderer, controls;
+        let terrainMesh, waterMesh;
+        let simplex; 
+        let canJump = false; // State to prevent mid-air jumps
+        
+        // Initialize clock here so it is available before animate()
+        const clock = new THREE.Clock();
+
+        // Movement state
+        const moveState = { forward: false, backward: false, left: false, right: false, run: false };
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        
+        // Colors
+        const COLORS = {
+            DEEP_WATER: new THREE.Color(0x004080),
+            WATER: new THREE.Color(0x006994),
+            SAND: new THREE.Color(0xe6c288),
+            GRASS: new THREE.Color(0x567d46),
+            ROCK: new THREE.Color(0x5a5a5a),
+            SNOW: new THREE.Color(0xffffff)
+        };
+
+        // --- 3. Initialization ---
+
+        init();
+        animate();
+
+        function init() {
+            // Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); 
+            scene.fog = new THREE.Fog(0x87CEEB, 100, 700);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.y = 50;
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // Lighting
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            hemiLight.position.set(0, 200, 0);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffdfba, 1.5);
+            dirLight.position.set(100, 300, 50);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.top = 200;
+            dirLight.shadow.camera.bottom = -200;
+            dirLight.shadow.camera.left = -200;
+            dirLight.shadow.camera.right = 200;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            scene.add(dirLight);
+
+            // Controls
+            controls = new PointerLockControls(camera, document.body);
+
+            // Event Listeners
+            document.addEventListener('click', () => {
+                if(!controls.isLocked && event.target.closest('#canvas-container')) {
+                    controls.lock();
+                }
+            });
+
+            controls.addEventListener('lock', () => {
+                document.getElementById('instructions').style.opacity = 0;
+            });
+
+            controls.addEventListener('unlock', () => {
+                document.getElementById('instructions').style.opacity = 1;
+            });
+
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            window.addEventListener('resize', onWindowResize);
+            
+            document.getElementById('genBtn').addEventListener('click', generateWorldFromInput);
+
+            // Initial Generation
+            generateWorld("mountains");
+        }
+
+        // --- 4. World Generation Logic ---
+
+        function generateWorldFromInput() {
+            const seed = document.getElementById('seedInput').value || "default";
+            const btn = document.getElementById('genBtn');
+            const load = document.getElementById('loading');
+            
+            btn.disabled = true;
+            load.style.display = 'block';
+
+            setTimeout(() => {
+                generateWorld(seed);
+                btn.disabled = false;
+                load.style.display = 'none';
+                
+                // Reset player position high up
+                camera.position.set(0, 200, 0);
+                velocity.set(0,0,0);
+            }, 50);
+        }
+
+        function generateWorld(seed) {
+            if(terrainMesh) {
+                scene.remove(terrainMesh);
+                terrainMesh.geometry.dispose();
+                terrainMesh.material.dispose();
+            }
+            if(waterMesh) {
+                scene.remove(waterMesh);
+                waterMesh.geometry.dispose();
+                waterMesh.material.dispose();
+            }
+
+            const rng = new SeededRandom(seed);
+            simplex = new SimplexNoise(() => rng.next());
+
+            const geometry = new THREE.PlaneGeometry(WORLD_WIDTH, WORLD_DEPTH, SEGMENTS, SEGMENTS);
+            geometry.rotateX(-Math.PI / 2);
+
+            const count = geometry.attributes.position.count;
+            const colors = [];
+            
+            for (let i = 0; i < count; i++) {
+                const x = geometry.attributes.position.getX(i);
+                const z = geometry.attributes.position.getZ(i);
+
+                let y = getNoiseHeight(x, z);
+
+                geometry.attributes.position.setY(i, y);
+
+                let color;
+                if (y < 4) {
+                    color = COLORS.SAND;
+                } else if (y < 35) {
+                    color = COLORS.GRASS;
+                } else if (y < 65) {
+                    color = COLORS.ROCK;
+                } else {
+                    color = COLORS.SNOW;
+                }
+
+                const variation = (Math.random() - 0.5) * 0.1;
+                colors.push(color.r + variation, color.g + variation, color.b + variation);
+            }
+
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshStandardMaterial({ 
+                vertexColors: true,
+                flatShading: true,
+                roughness: 0.8,
+                metalness: 0.1
+            });
+
+            terrainMesh = new THREE.Mesh(geometry, material);
+            terrainMesh.receiveShadow = true;
+            terrainMesh.castShadow = true;
+            scene.add(terrainMesh);
+
+            const waterGeo = new THREE.PlaneGeometry(WORLD_WIDTH, WORLD_DEPTH);
+            waterGeo.rotateX(-Math.PI / 2);
+            const waterMat = new THREE.MeshStandardMaterial({
+                color: 0x006994,
+                transparent: true,
+                opacity: 0.7,
+                roughness: 0.1,
+                metalness: 0.5
+            });
+            waterMesh = new THREE.Mesh(waterGeo, waterMat);
+            waterMesh.position.y = 2; 
+            scene.add(waterMesh);
+        }
+
+        function getNoiseHeight(x, z) {
+            let y = 0;
+            y += simplex.noise(x * 0.003, z * 0.003) * 60;   
+            y += simplex.noise(x * 0.01, z * 0.01) * 20;     
+            y += simplex.noise(x * 0.03, z * 0.03) * 5;      
+            
+            if (y < 0) y = y * 0.6; 
+            
+            return y;
+        }
+
+
+        // --- 5. Inputs & Physics ---
+
+        function onKeyDown(event) {
+            switch (event.code) {
+                case 'ArrowUp': case 'KeyW': moveState.forward = true; break;
+                case 'ArrowLeft': case 'KeyA': moveState.left = true; break;
+                case 'ArrowDown': case 'KeyS': moveState.backward = true; break;
+                case 'ArrowRight': case 'KeyD': moveState.right = true; break;
+                case 'ShiftLeft': case 'ShiftRight': moveState.run = true; break;
+                case 'Space': 
+                    if (canJump) {
+                        velocity.y += JUMP_HEIGHT; 
+                        canJump = false;
+                    }
+                    break;
+            }
+        }
+
+        function onKeyUp(event) {
+            switch (event.code) {
+                case 'ArrowUp': case 'KeyW': moveState.forward = false; break;
+                case 'ArrowLeft': case 'KeyA': moveState.left = false; break;
+                case 'ArrowDown': case 'KeyS': moveState.backward = false; break;
+                case 'ArrowRight': case 'KeyD': moveState.right = false; break;
+                case 'ShiftLeft': case 'ShiftRight': moveState.run = false; break;
+            }
+        }
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- 6. Animation Loop ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = Math.min(clock.getDelta(), 0.1); 
+
+            if (controls.isLocked) {
+                
+                // 1. Friction / Damping for Horizontal Movement only
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                
+                // Gravity (Always applied)
+                velocity.y -= GRAVITY * delta;
+
+                // 2. Input Direction
+                direction.z = Number(moveState.forward) - Number(moveState.backward);
+                direction.x = Number(moveState.right) - Number(moveState.left);
+                direction.normalize(); 
+
+                // 3. Acceleration
+                const speed = moveState.run ? 1500.0 : 600.0;
+                
+                if (moveState.forward || moveState.backward) velocity.z -= direction.z * speed * delta;
+                if (moveState.left || moveState.right) velocity.x -= direction.x * speed * delta;
+
+                // 4. Apply Movement
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+                
+                // Apply Vertical Velocity (Gravity/Jump)
+                camera.position.y += velocity.y * delta;
+
+                // 5. Terrain Collision (Ground Detection)
+                const pX = camera.position.x;
+                const pZ = camera.position.z;
+
+                // Ensure we are inside world bounds
+                if (pX > -WORLD_WIDTH/2 && pX < WORLD_WIDTH/2 && pZ > -WORLD_DEPTH/2 && pZ < WORLD_DEPTH/2) {
+                    const terrainHeight = getNoiseHeight(pX, pZ);
+                    const waterHeight = 2;
+                    
+                    const floor = Math.max(terrainHeight, waterHeight);
+                    
+                    // Collision check
+                    if (camera.position.y < floor + PLAYER_HEIGHT) {
+                        velocity.y = 0;
+                        camera.position.y = floor + PLAYER_HEIGHT;
+                        canJump = true;
+                    }
+                } else {
+                    // Reset if fell off world
+                    if (camera.position.y < -100) {
+                        velocity.y = 0;
+                        camera.position.set(0, 200, 0);
+                    }
+                }
+            }
+
+            // Animate Water slightly
+            if(waterMesh) {
+                waterMesh.material.opacity = 0.6 + Math.sin(Date.now() * 0.001) * 0.1;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+    </script>
+</body>
+</html>
